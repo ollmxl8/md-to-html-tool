@@ -15,19 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: get version
-        run: echo "PACKAGE_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
-
       - name: Create Release
         id: create-release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: App v${{ env.PACKAGE_VERSION }}
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -40,9 +33,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # 打包 Mac 版
+          - platform: 'macos-latest'
             args: '--target aarch64-apple-darwin'
-          - platform: 'windows-latest' # 打包 Windows 版
+          - platform: 'windows-latest'
             args: ''
 
     runs-on: ${{ matrix.platform }}
@@ -63,7 +56,6 @@ jobs:
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Mac M1/M2 需要这个 target
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: install dependencies
