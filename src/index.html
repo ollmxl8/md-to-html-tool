@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Markdown 转 HTML 工具</title>
+    <style>
+      /* 简单的 CSS 美化 */
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+        background-color: #f6f8fa;
+        color: #333;
+      }
+      h1 { margin-bottom: 30px; font-size: 24px; }
+      .btn-container { display: flex; flex-direction: column; gap: 15px; width: 80%; max-width: 300px; }
+      button {
+        padding: 15px;
+        font-size: 16px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background 0.2s;
+        font-weight: bold;
+      }
+      .btn-primary { background-color: #007bff; color: white; }
+      .btn-primary:hover { background-color: #0056b3; }
+      .btn-secondary { background-color: #28a745; color: white; }
+      .btn-secondary:hover { background-color: #1e7e34; }
+      #status { margin-top: 20px; font-size: 14px; color: #666; text-align: center; white-space: pre-wrap;}
+    </style>
+  </head>
+  <body>
+    <h1>Markdown 表格转 HTML</h1>
+    
+    <div class="btn-container">
+      <button class="btn-primary" id="btn-file">📁 选择 Markdown 文件</button>
+      <button class="btn-secondary" id="btn-clipboard">📋 从剪贴板读取并保存</button>
+    </div>
+
+    <div id="status"></div>
+
+    <script type="module">
+      // ----------------------------------------------------
+      // 1. 导入修复：添加了 missing 的 'message'
+      // ----------------------------------------------------
+      import { open, save, message } from '@tauri-apps/plugin-dialog';
+      import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+      import { readText } from '@tauri-apps/plugin-clipboard-manager';
+      
+      // 注意：Tauri v2 的 api/core 主要是 invoke，这里暂时没用到 invoke，但留着无妨
+      import { invoke } from '@tauri-apps/api/core'; 
+
+      const statusDiv = document.getElementById('status');
+
+      // ==========================================
+      // 核心逻辑：JS 解析 Markdown 表格
+      // ==========================================
+      function convertMdToHtml(mdContent, fileNameBase) {
+        try {
+          // 1. 拆分行并清洗
+          let lines = mdContent.split('\n');
+          // 移除 Markdown 分隔线 (包含 --- 的行) 和空行
+          lines = lines.filter(line => !line.includes('---') && line.trim() !== '');
+
+          if (lines.length < 2) throw new Error("内容似乎为空或格式不正确");
+
+          // 2. 解析表头
+          // 使用 filter(h => h !== '') 来去除 split 产生的首尾空字符串
+          const headers = lines[0].split('|').map(h => h.trim()).filter(h => h !== '');
+          
+          // 找到我们关心的列的索引
+          const targetCols = ['mainTaskId', 'time', 'userId', 'output'];
+          const colIndices = {};
+          
+          headers.forEach((h, index) => {
+            if (targetCols.includes(h)) colIndices[h] = index;
+          });
+
+          // 3. 解析数据行
+          const dataRows = [];
+          
+          for (let i = 1; i < lines.length; i++) {
+            // ----------------------------------------------------
+            // 解析优化：数据行的处理方式必须和表头完全一致，否则索引会错位
+            // ----------------------------------------------------
+            const rawCells = lines[i].split('|').map(c => c.trim()).filter(c => c !== '');
+            
+            // 如果这一行是空的或者没数据，跳过
+            if (rawCells.length === 0) continue;
+
+            const rowData = {};
+            
+            targetCols.forEach(col => {
+               // 根据表头记录的 index 去取数据
+               const idx = colIndices[col];
+               if (idx !== undefined && rawCells[idx] !== undefined) {
+                   rowData[col] = rawCells[idx];
+               } else {
+                   rowData[col] = '';
+               }
+            });
+
+            // 4. 处理 Output 图片 JSON
+            rowData.images = [];
+            if (rowData['output']) {
+              try {
+                // 有些 Markdown 内容里的引号可能被转义，简单清洗一下
+                const jsonStr = rowData['output'].replace(/\\"/g, '"'); 
+                const parsed = JSON.parse(jsonStr);
+                if (Array.isArray(parsed)) {
+                  rowData.images = parsed;
+                }
+              } catch (e) {
+                // 尝试直接解析失败，说明可能不是标准 JSON，或者是空
+                // 生产环境可以加更多容错，这里保持简单
+              }
+            }
+            dataRows.push(rowData);
+          }
+
+          // 计算最大图片数列数
+          const maxImgCount = Math.max(...dataRows.map(r => r.images.length), 0);
+
+          // 5. 生成 HTML 表格
+          let tableHtml = '<table><thead><tr>';
+          // 固定列头
+          ['mainTaskId', 'time', 'userId'].forEach(col => {
+             if (colIndices[col] !== undefined) tableHtml += `<th>${col}</th>`;
+          });
+          // 图片列头
+          for (let k = 0; k < maxImgCount; k++) {
+            tableHtml += `<th>Output Image ${k+1}</th>`;
+          }
+          tableHtml += '</tr></thead><tbody>';
+
+          // 数据行
+          dataRows.forEach(row => {
+            tableHtml += '<tr>';
+            ['mainTaskId', 'time', 'userId'].forEach(col => {
+              if (colIndices[col] !== undefined) tableHtml += `<td>${row[col] || ''}</td>`;
+            });
+
+            // 图片列
+            for (let k = 0; k < maxImgCount; k++) {
+              const imgUrl = row.images[k];
+              let cellContent = '';
+              if (imgUrl) {
+                // 懒加载 + 原图 + Zoom 样式
+                cellContent = `
+                  <a href="${imgUrl}" target="_blank" title="点击查看大图">
+                    <img src="${imgUrl}" loading="lazy" width="150" 
+                         style="border-radius:5px; border:1px solid #ccc; object-fit: cover; height: 150px; cursor: zoom-in;">
+                  </a>
+                `;
+              }
+              tableHtml += `<td>${cellContent}</td>`;
+            }
+            tableHtml += '</tr>';
+          });
+          tableHtml += '</tbody></table>';
+
+          // 6. 最终 HTML 结构
+          return `
+            <html>
+            <head>
+              <meta charset='utf-8'>
+              <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; }
+                table { border-collapse: collapse; width: 100%; }
+                th { background-color: #f2f2f2; padding: 10px; text-align: left; border: 1px solid #ddd; position: sticky; top: 0; z-index: 10;}
+                td { padding: 10px; border: 1px solid #ddd; vertical-align: top; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+                tr:hover { background-color: #f1f1f1; }
+              </style>
+            </head>
+            <body>
+              <h2>处理结果: ${fileNameBase}</h2>
+              ${tableHtml}
+            </body>
+            </html>
+          `;
+        } catch (error) {
+          throw error;
+        }
+      }
+
+      // ==========================================
+      // 辅助函数：生成输出文件名 (跨平台兼容)
+      // ==========================================
+      function getOutputPath(originalPath) {
+        // 找到最后一个点的位置
+        const lastDotIndex = originalPath.lastIndexOf('.');
+        if (lastDotIndex === -1) {
+            return originalPath + "_output.html";
+        }
+        // 截取点之前的部分 + 后缀
+        return originalPath.substring(0, lastDotIndex) + "_output.html";
+      }
+
+      // 辅助函数：从路径获取文件名
+      function getFileNameBase(originalPath) {
+        // 兼容 Windows (\) 和 Unix (/) 分隔符
+        const separator = originalPath.includes('\\') ? '\\' : '/';
+        const fullName = originalPath.split(separator).pop();
+        const lastDotIndex = fullName.lastIndexOf('.');
+        return lastDotIndex === -1 ? fullName : fullName.substring(0, lastDotIndex);
+      }
+
+      // ==========================================
+      // 事件绑定
+      // ==========================================
+
+      // 功能 1：选择文件
+      document.getElementById('btn-file').addEventListener('click', async () => {
+        try {
+          const selected = await open({
+            filters: [{ name: 'Markdown', extensions: ['md', 'txt'] }]
+          });
+
+          if (selected) {
+            statusDiv.textContent = "正在处理...";
+            
+            // 读取文件
+            const content = await readTextFile(selected);
+            
+            // 获取文件名信息
+            const fileBase = getFileNameBase(selected);
+            const outputName = getOutputPath(selected);
+
+            // 转换
+            const html = convertMdToHtml(content, fileBase);
+
+            // 写入
+            await writeTextFile(outputName, html);
+
+            statusDiv.textContent = "完成！";
+            await message(`成功！\n已保存至: ${outputName}`);
+            statusDiv.textContent = "";
+          }
+        } catch (err) {
+          console.error(err);
+          await message(`错误: ${err}`, { kind: 'error' }); // Tauri v2 message 类型参数变了，也可以不传
+          statusDiv.textContent = "发生错误";
+        }
+      });
+
+      // 功能 2：剪贴板
+      document.getElementById('btn-clipboard').addEventListener('click', async () => {
+        try {
+          const content = await readText();
+          if (!content || !content.trim()) {
+            await message('剪贴板为空！');
+            return;
+          }
+
+          // 询问保存位置 (保存 .md)
+          const savePath = await save({
+            filters: [{ name: 'Markdown', extensions: ['md'] }],
+            defaultPath: 'clipboard_data.md'
+          });
+
+          if (savePath) {
+            statusDiv.textContent = "正在处理...";
+            // 1. 保存 MD
+            await writeTextFile(savePath, content);
+
+            // 2. 转换并保存 HTML
+            const fileBase = getFileNameBase(savePath);
+            const outputName = getOutputPath(savePath);
+
+            const html = convertMdToHtml(content, fileBase);
+            await writeTextFile(outputName, html);
+
+            statusDiv.textContent = "完成！";
+            await message(`成功！\n已保存至: ${outputName}`);
+            statusDiv.textContent = "";
+          }
+
+        } catch (err) {
+          console.error(err);
+          await message(`错误: ${err}`);
+          statusDiv.textContent = "发生错误";
+        }
+      });
+    </script>
+  </body>
+</html>
