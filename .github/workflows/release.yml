@@ -19,7 +19,8 @@ jobs:
         id: create-release
         uses: softprops/action-gh-release@v2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 关键修改：这里改成了我们刚才设置的 MY_TOKEN
+          GITHUB_TOKEN: ${{ secrets.MY_TOKEN }}
         with:
           draft: false
           prerelease: false
@@ -64,7 +65,8 @@ jobs:
       - name: Build and Upload
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 关键修改：这里也改成了 MY_TOKEN
+          GITHUB_TOKEN: ${{ secrets.MY_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
